@@ -1,6 +1,6 @@
 /* Ghast service worker — exists so Chrome treats the page as an installable app,
    and so it still opens with no connection. Bump CACHE after editing index.html. */
-const CACHE = 'ghast-v1';
+const CACHE = 'ghast-v2';
 const ASSETS = ['./', './index.html', './manifest.webmanifest'];
 
 self.addEventListener('install', e => {
