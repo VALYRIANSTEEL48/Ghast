@@ -48,7 +48,11 @@ h1{font-size:26px;font-weight:700;letter-spacing:-.02em}
 .ib{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--mut)}
 .ib:active{background:var(--card)}
 .bal{text-align:center;padding:26px 16px 6px}
-.balv{font-size:46px;font-weight:600;letter-spacing:-.025em;line-height:1.1;font-variant-numeric:tabular-nums}
+.balv{font-size:46px;font-weight:600;letter-spacing:-.025em;line-height:1.1;font-variant-numeric:tabular-nums;display:inline-block;padding:0 6px;border-radius:14px;transition:background .18s}
+.balv:active{background:var(--card)}
+.balv.pop{animation:pop .5s ease-out}
+@keyframes pop{0%{background:var(--acbg);color:var(--ac)}100%{background:transparent;color:var(--tx)}}
+.upd{margin-top:9px;font-size:11.5px;color:var(--soft);letter-spacing:.01em;font-variant-numeric:tabular-nums}
 .chg{display:inline-flex;align-items:center;gap:8px;margin-top:10px;padding:5px 12px;border-radius:99px;font-size:14.5px;font-weight:600;font-variant-numeric:tabular-nums}
 .chg.up{background:rgba(47,224,139,.12)} .chg.dn{background:rgba(255,92,92,.12)} .chg.flat{background:var(--card);color:var(--mut)}
 .chg .lbl{font-weight:500;color:var(--mut);font-size:12px}
@@ -551,7 +555,7 @@ function deposit(id,usd){
 function save(){
   try{
     const m={...M,coins:M.coins.map(c=>({...c,h:c.h.map(x=>+x.toPrecision(6))})),sol:{...M.sol,h:M.sol.h.map(x=>+x.toPrecision(6))}};
-    localStorage.setItem(KEY,JSON.stringify({v:1,t:Date.now(),W,M:m,S:{speed:S.speed,slip:S.slip}}));
+    localStorage.setItem(KEY,JSON.stringify({v:1,t:Date.now(),W,M:m,S:{speed:S.speed,slip:S.slip,refresh:S.refresh}}));
   }catch(e){}
 }
 function loadSaved(){
@@ -566,7 +570,7 @@ function loadSaved(){
 /* ============================================================
    UI STATE + SHELL
    ============================================================ */
-const S={tab:'home',speed:1,slip:.05,ex:'trend',win:300,q:'',pnl:'session',base:0,swap:{from:'SOL',to:'USDC',amt:''},detail:null,tf:300,hover:null,exIds:[],exAt:0,exDirty:true,actDirty:true,actC:0,busy:false};
+const S={tab:'home',speed:1,slip:.05,refresh:30,lastR:0,ex:'trend',win:300,q:'',pnl:'session',base:0,swap:{from:'SOL',to:'USDC',amt:''},detail:null,tf:300,hover:null,exIds:[],exAt:0,exDirty:true,actDirty:true,actC:0,busy:false};
 const NAV=[['home','Home','home'],['swap','Swap','swap'],['explore','Explore','explore'],['activity','Activity','clock']];
 
 function buildNav(){
@@ -580,6 +584,7 @@ function setTab(k){
   if(k==='swap'){renderSwapChips();swapTick()}
   if(k==='activity'){renderActivity()}
   if(k==='home')homeTick();
+  stampR();
 }
 
 /* ---------- toasts ---------- */
@@ -653,7 +658,8 @@ function buildHome(){
     <button class="acct" data-a="settings"><span class="av">${ghast(18,false)}</span><span id="acName"></span>${ic('down',16)}</button>
     <div class="tr"><button class="ib" data-a="tab" data-v="explore" aria-label="Search">${ic('search',21)}</button><button class="ib" data-a="settings" aria-label="Settings">${ic('gear',21)}</button></div>
   </div>
-  <div class="bal"><div class="balv" id="balV">$0.00</div><button class="chg flat" id="balC" data-a="pnl"><span id="balD">+$0.00 +0.00%</span><span class="lbl" id="balL">Session</span></button></div>
+  <div class="bal"><button class="balv" id="balV" data-a="refresh" aria-label="Tap to update prices">$0.00</button><br><button class="chg flat" id="balC" data-a="pnl"><span id="balD">+$0.00 +0.00%</span><span class="lbl" id="balL">Session</span></button>
+    <div class="upd" id="balU" data-a="refresh"></div></div>
   <div class="acts">${acts.map(([a,l,i])=>`<button class="act" data-a="${a}">${ic(i,23)}<span>${l}</span></button>`).join('')}</div>
   <div class="sec">Tokens</div>
   <div id="homeList"></div>
@@ -921,7 +927,7 @@ function reviewSwap(){
       <div class="irow"><span>Network fee</span><b>${NET_FEE} SOL</b></div>
       <div class="irow"><span>Slippage tolerance</span><b>${Math.round(S.slip*100)}%</b></div></div>
     <button class="btn" id="cfBtn">Confirm swap</button>`,sh=>{
-    S.rev={from,to,a};
+    S.rev={from,to,a};stampR();
     $('#cfBtn',sh).onclick=()=>{
       if(S.busy)return;S.busy=true;S.rev=null;
       const q0=quote(from,to,a);                       // price at the moment you tap confirm
@@ -1038,6 +1044,7 @@ function openSettings(){
   openSheet('Settings',`
     <div class="set"><div><div>Account name</div><div class="d">${W.name}</div></div><button class="mini" data-x="rename">Edit</button></div>
     <div class="set"><div><div>Market speed</div><div class="d">1x = real time. Higher speeds fast-forward the market.</div></div>${seg('speed',[1,2,5,10],S.speed,v=>v+'x')}</div>
+    <div class="set"><div><div>Price updates</div><div class="d">How often the screen redraws. The market itself always runs every second.</div></div>${seg('refresh',[0,15,30,60],S.refresh,v=>v?v+'s':'Live')}</div>
     <div class="set"><div><div>Slippage</div><div class="d">Max price movement per swap</div></div>${seg('slip',[.01,.05,.1],S.slip,v=>v*100+'%')}</div>
     <div class="set"><div><div>Lock wallet</div></div><button class="mini" data-x="lock">Lock</button></div>
     <div class="set"><div><div>Reset wallet</div><div class="d">Wipe everything and start with a fresh $100K</div></div><button class="mini" style="color:var(--dn);background:rgba(255,92,92,.12)" data-x="reset">Reset</button></div>
@@ -1045,6 +1052,7 @@ function openSettings(){
     sh.addEventListener('click',e=>{
       const b=e.target.closest('[data-x]');if(!b)return;const k=b.dataset.x,v=b.dataset.v;
       if(k==='speed'){S.speed=+v;save();openSettings()}
+      else if(k==='refresh'){S.refresh=+v;refreshNow();save();openSettings()}
       else if(k==='slip'){S.slip=+v;renderSwapChips();save();openSettings()}
       else if(k==='rename'){const n=prompt('Account name',W.name);if(n&&n.trim()){W.name=n.trim().slice(0,20);setText($('#acName'),W.name);save();openSettings()}}
       else if(k==='lock'){closeSheet(true);showLock('lock')}
@@ -1080,6 +1088,7 @@ const ACT={
   settings:()=>openSettings(),
   slip:()=>openSlip(),
   pnl:()=>{S.pnl=S.pnl==='session'?'all':'session';homeTick()},
+  refresh:()=>refreshNow(),
   ex:b=>{S.ex=b.dataset.v;S.exDirty=true;$$('#exTabs .chip').forEach(c=>c.classList.toggle('on',c===b));exTick()},
   win:b=>{S.win=+b.dataset.v;S.exDirty=true;$$('#exWin .chip').forEach(c=>c.classList.toggle('on',c===b));exTick()},
   tf:b=>{S.tf=+b.dataset.v;$$('.tf').forEach(c=>c.classList.toggle('on',c===b));detailTick()},
@@ -1112,9 +1121,20 @@ function notifyRugs(){
   for(const c of M.coins){
     if(c.justRugged){
       c.justRugged=false;
-      if(W.H[c.id])toast(`<b>${c.sym}</b> just got rugged. Liquidity was pulled.`,'bad','alert',()=>openDetail(c.id));
+      if(W.H[c.id]){toast(`<b>${c.sym}</b> just got rugged. Liquidity was pulled.`,'bad','alert',()=>openDetail(c.id));refreshNow()}
     }
   }
+}
+function stampR(){S.lastR=Date.now();updAge()}
+function updAge(){
+  const u=$('#balU');if(!u)return;
+  if(!S.refresh){setText(u,'Live prices');return}
+  const a=Math.floor((Date.now()-S.lastR)/1000);
+  setText(u,(a<1?'Prices just updated':`Prices updated ${a}s ago`)+' \u00b7 tap the total to update');
+}
+function refreshNow(){
+  stampR();renderTick();
+  const b=$('#balV');if(b){b.classList.remove('pop');void b.offsetWidth;b.classList.add('pop')}
 }
 function renderTick(){
   homeTick();
@@ -1132,7 +1152,12 @@ function loop(){
   if(n<=0)return;
   n=Math.min(n,1800);
   for(let i=0;i<n;i++)stepAll();
-  notifyRugs();renderTick();
+  notifyRugs();
+  /* The market keeps ticking every second underneath, but the screen only
+     redraws on the refresh interval, so prices sit still long enough to read. */
+  if(!S.refresh||now-S.lastR>=S.refresh*1000){S.lastR=now;renderTick()}
+  updAge();
+  revTick(); // the review sheet is a live decision screen, never frozen
   if(now-lastSave>10000){lastSave=now;save()}
 }
 
@@ -1141,6 +1166,7 @@ function boot(){
   let fresh=false;
   if(saved){
     M=saved.M;W=saved.W;S.speed=saved.S&&saved.S.speed||1;S.slip=saved.S&&saved.S.slip||.05;
+    S.refresh=saved.S&&saved.S.refresh!=null?saved.S.refresh:30;
     reindex();
     const el_=Math.min(900,Math.max(0,Math.floor((Date.now()-saved.t)/1000*S.speed)));
     for(let i=0;i<el_;i++)stepAll();
@@ -1150,7 +1176,7 @@ function boot(){
   }
   S.base=portfolioValue();
   buildNav();buildHome();buildSwap();buildExplore();buildActivity();
-  renderSwapChips();homeTick();
+  renderSwapChips();homeTick();stampR();
   if(fresh)showLock('new');
   last=Date.now();
   setInterval(loop,200);
