@@ -191,6 +191,14 @@ h1{font-size:26px;font-weight:700;letter-spacing:-.02em}
 /* lock */
 #lock{position:absolute;inset:0;z-index:80;background:radial-gradient(600px 400px at 50% 0%,rgba(171,159,242,.22),transparent),var(--bg);display:none;flex-direction:column;align-items:center;justify-content:center;padding:32px 28px calc(28px + var(--safe-b));text-align:center}
 #lock.on{display:flex}
+#catch{position:absolute;inset:0;z-index:90;background:var(--bg);display:none;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:32px;text-align:center}
+#catch.on{display:flex}
+#catch .logo{animation:float 4s ease-in-out infinite}
+#catch .cl{font-size:15px;color:var(--mut);font-weight:500}
+#catch .bar{width:180px;height:4px;border-radius:99px;background:var(--card);overflow:hidden}
+#catch .bar i{display:block;height:100%;width:0;background:var(--ac);transition:width .12s}
+.away-l{color:var(--mut);font-size:14px;margin:0 0 12px}
+.away{padding:14px 16px;margin-bottom:8px}.away .k{font-size:12.5px;color:var(--mut)}.away .v{font-size:26px;font-weight:600;font-variant-numeric:tabular-nums;margin:2px 0}
 #lock .logo{animation:float 4s ease-in-out infinite}
 @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
 #lock h1{margin-top:22px;font-size:30px}
@@ -253,7 +261,8 @@ function fmtPrice(p){
   return '$'+p.toFixed(zeros+4);
 }
 function fmtPct(x,sign=true){const v=x*100,a=Math.abs(v);const s=a>=1000?nf(a,0):nf(a,2);return (v<0&&s!=='0.00'?'-':(sign&&v>0?'+':''))+s+'%'}
-function fmtAge(s){s=Math.floor(s);if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m '+String(s%60).padStart(2,'0')+'s';return Math.floor(s/3600)+'h '+String(Math.floor(s%3600/60)).padStart(2,'0')+'m'}
+function fmtAge(s){s=Math.floor(s);if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m '+String(s%60).padStart(2,'0')+'s';if(s<86400)return Math.floor(s/3600)+'h '+String(Math.floor(s%3600/60)).padStart(2,'0')+'m';return Math.floor(s/86400)+'d '+String(Math.floor(s%86400/3600)).padStart(2,'0')+'h'}
+function fmtDur(s){s=Math.round(s);if(s<3600)return Math.max(1,Math.round(s/60))+' min';if(s<86400){const h=Math.floor(s/3600),m=Math.round(s%3600/60);return h+'h'+(m?' '+m+'m':'')}const d=Math.floor(s/86400),h=Math.round(s%86400/3600);return d+(d===1?' day':' days')+(h?' '+h+'h':'')}
 function ago(ts){const s=(Date.now()-ts)/1000;if(s<10)return 'Just now';if(s<60)return Math.floor(s)+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago'}
 
 /* ---------- icons ---------- */
@@ -304,30 +313,49 @@ function iconHTML(i,size=40){
 /* ============================================================
    MARKET ENGINE
    ------------------------------------------------------------
-   1 step = 1 simulated second. Every step is stored in history
-   (no down-sampling). Each coin gets a hidden "fate" at birth
-   that shapes its price path, then noise, jumps, volatility
-   clustering, SOL beta and trade impact are layered on top.
+   Time: 1 step = 1 simulated second, and M.t counts them.
+   While the app is open every coin and SOL advance one second
+   at a time. When you come back after being away, the gap is
+   replayed at 1x so the market carries on from exactly where
+   you left it:
+     - the final hour is replayed second by second,
+     - older parts of the gap use 1-minute (or, past a week,
+       1-hour) steps. Every noise term is an AR(1)/OU process,
+       and these are aggregated exactly over a multi-second
+       step, so a 60s step has the same statistics as sixty
+       1s steps.
+   History is kept at three resolutions so charts can reach
+   back further than an hour without storing every second:
+     h  : every second, last hour
+     hm : every minute close, last 7 days
+     hh : every hour close, last 2 years
+   Each close is a real simulated price at that instant, not
+   an average.
    ============================================================ */
-const HCAP=3000;                 // history points kept per token
-const SPAWN=1/12;                // chance per step that a new coin launches
-const KEY='ghast.v1';
+const SEC_KEEP=3600, MIN_KEEP=10080, HR_KEEP=17520;
+const SPAWN=1/300;               // launches per simulated second (about one every 5 min)
+const MAX_CATCHUP=365*86400;     // replay at most a year of absence
+const KEY='ghast.v1';            // old localStorage save, migrated on first run
 const FATES={ // odds sum to 1: 49% duds/flat/rugs, 40% decent, 10% great, 1% moon
   rug:.12, dud:.22, flat:.15, decent:.40, great:.10, moon:.01
 };
 const TIERS={
-  meme:{sig:[.010,.016],theta:.035,beta:.7,jump:.006,mcap:[5e4,1.5e6],liqR:[.15,.40]},
-  alt: {sig:[.005,.008],theta:.05,beta:.9,jump:.002,mcap:[3e6,60e6],liqR:[.05,.12]},
-  util:{sig:[.002,.005],theta:.06,beta:1,jump:.001,mcap:[2e7,4e8],liqR:[.03,.08]}
+  // sig: fast tick noise (reverts in ~20s). s2: size of the slow wandering that gives charts their trends.
+  meme:{sig:[.004,.006],theta:.035,s2:.15,beta:.7,jump:.006,mcap:[5e4,1.5e6],liqR:[.15,.40]},
+  alt: {sig:[.002,.003],theta:.05, s2:.07,beta:.9,jump:.002,mcap:[3e6,60e6],liqR:[.05,.12]},
+  util:{sig:[.001,.002],theta:.06, s2:.04,beta:1, jump:.001,mcap:[2e7,4e8],liqR:[.03,.08]}
 };
+const TH2=.0003;                 // slow drift component, half-life ~40 min
 const TIERW={ // which kind of token each fate tends to be
   rug:{meme:85,alt:12,util:3}, dud:{meme:60,alt:25,util:15}, flat:{meme:45,alt:30,util:25},
   decent:{meme:40,alt:35,util:25}, great:{meme:60,alt:30,util:10}, moon:{meme:85,alt:15,util:0}
 };
-const LIFE={rug:[90,600],dud:[180,900],flat:[200,900],decent:[240,1200],great:[300,1500],moon:[420,1800]};
-const DECAY={moon:.0007,great:.0004,decent:.0002,dud:0,flat:0,rug:0};
+// Active life in seconds (log-uniform): minutes to a few days. Rugs can strike fast or after a long slow pump.
+const LIFE={rug:[300,43200],dud:[1800,86400],flat:[3600,86400],decent:[3600,86400],great:[7200,129600],moon:[14400,259200]};
+// After its run ends, how much of the gain a coin gives back (share of its log gain)
+const RETRACE={decent:[.2,.6],great:[.35,.75],moon:[.5,.85]};
 
-const ADJ=['Turbo','Giga','Based','Sad','Angry','Baby','Mega','Dark','Lil','Sigma','Cursed','Wet','Toxic','Cosmic','Broke','Rich','Tiny','Sleepy','Dizzy','Feral','Lucky','Spicy','Shy','Ultra','Retard','Glitch','Haunted','Sus'];
+const ADJ=['Turbo','Giga','Based','Sad','Angry','Baby','Mega','Dark','Lil','Sigma','Cursed','Wet','Toxic','Cosmic','Broke','Rich','Tiny','Sleepy','Dizzy','Feral','Lucky','Spicy','Shy','Ultra','Chad','Glitch','Haunted','Sus'];
 const ANI=[['Frog','🐸'],['Dog','🐶'],['Cat','🐱'],['Ape','🦍'],['Duck','🦆'],['Hamster','🐹'],['Pig','🐷'],['Fox','🦊'],['Bear','🐻'],['Turtle','🐢'],['Unicorn','🦄'],['Banana','🍌'],['Pizza','🍕'],['Ghost','👻'],['Clown','🤡'],['Penguin','🐧'],['Shark','🦈'],['Octopus','🐙'],['Potato','🥔'],['Shroom','🍄'],['Chicken','🐔'],['Gator','🐊'],['Rex','🦖'],['Goat','🐐'],['Moon','🌙'],['Rocket','🚀'],['Skull','💀'],['Flame','🔥'],['Wizard','🧙'],['Alien','👽']];
 const UP=['Nova','Orbit','Lumen','Vertex','Helix','Quanta','Nimbus','Aether','Zenith','Cipher','Pulse','Arc','Flux','Kite','Onyx','Prism','Tidal','Vector','Echo','Solstice','Axiom','Meridian','Cortex','Synth','Atlas','Ember','Halo','Rift','Sable','Tundra'];
 const US={util:['Protocol','Network','Labs','Pay','Oracle','Bridge','Vault','Compute','Storage','Identity','Swap','Finance'],alt:['Chain','Coin','Layer','AI','DAO','Money','X','Fi','Verse','Games']};
@@ -339,25 +367,33 @@ const ABOUT={
 const USDC_T={id:'USDC',kind:'stable',sym:'USDC',name:'USD Coin',price:1,ic:{k:'usdc'}};
 const USDT_T={id:'USDT',kind:'stable',sym:'USDT',name:'Tether USD',price:1,ic:{k:'usdt'}};
 let M=null, REG={};
-function newMarket(){return{seq:0,t:0,coins:[],sol:{id:'SOL',kind:'sol',sym:'SOL',name:'Solana',ic:{k:'sol'},price:150,h:[150],reg:0,sv:0,supply:6.1e8}}}
+function newMarket(){return{seq:0,t:0,coins:[],sol:{id:'SOL',kind:'sol',sym:'SOL',name:'Solana',ic:{k:'sol'},price:150,h:[150],hm:[],hh:[],anc:Math.log(150),reg:0,sv:0,supply:6.1e8}}}
 function reindex(){REG={SOL:M.sol,USDC:USDC_T,USDT:USDT_T};for(const c of M.coins)REG[c.id]=c}
 const T=id=>REG[id];
+const allTok=()=>[M.sol,...M.coins];
+
+/* ---- process helpers ---- */
+// x' = a·x + s·z applied dt times in a row collapses to x' = a^dt·x + s·K·z
+const AR1=[0,1];
+function arK(a,dt){if(dt===1){AR1[0]=a;return AR1}const ad=Math.pow(a,dt);return[ad,Math.sqrt((1-ad*ad)/(1-a*a))]}
+function pois(l){if(l<=0)return 0;if(l<30){let k=0,p=Math.exp(-l),s=p;const u=Math.random();while(u>s&&k<200){k++;p*=l/k;s+=p}return k}return Math.max(0,Math.round(l+Math.sqrt(l)*randn()))}
 
 function rollFate(){return wpick(FATES)}
 
 function makeIdentity(c){
-  const used=new Set(M.coins.map(x=>x.sym));
+  const used=new Set(M.coins.map(x=>x.sym)),names=new Set(M.coins.map(x=>x.name));
   for(let tries=0;tries<40;tries++){
     if(c.tier==='meme'){
       const a=pick(ADJ),[an,em]=pick(ANI);
       const name=Math.random()<.35?an:`${a} ${an}`;
+      if(names.has(name))continue;
       let sym=(name.includes(' ')?a[0]+an:an).toUpperCase().slice(0,6);
       if(used.has(sym))sym=(sym.slice(0,5)+pick('XZKQ')).slice(0,6);
       if(used.has(sym))continue;
       c.name=name;c.sym=sym;c.ic={k:'e',e:em,h1:randi(0,360),h2:randi(0,360)};return;
     }
     const p=pick(UP),s=pick(US[c.tier]);
-    const name=`${p} ${s}`;let sym=p.toUpperCase().slice(0,randi(3,4));
+    const name=`${p} ${s}`;if(names.has(name))continue;let sym=p.toUpperCase().slice(0,randi(3,4));
     if(used.has(sym))sym=(sym.slice(0,3)+pick('XZKQ'));
     if(used.has(sym))continue;
     c.name=name;c.sym=sym;c.ic={k:'g',s:randi(0,5),h1:randi(0,360),h2:randi(0,360)};return;
@@ -369,15 +405,15 @@ function makeCoin(opts={}){
   const fate=opts.fate||rollFate();
   const tier=wpick(TIERW[fate]),TT=TIERS[tier];
   const sc=tier==='util'?.5:tier==='alt'?.75:1;
-  const c={id:'c'+(++M.seq),kind:'coin',fate,tier,born:Date.now(),age:0,n:0,sv:0,imp:0,mk:0,fade:0,dead:false,rugged:false,vol:0,ve:0,addr:rAddr(44)};
+  const c={id:'c'+(++M.seq),kind:'coin',fate,tier,bt:M.t,age:0,n:0,n2:0,sv:0,imp:0,mk:0,fade:0,dead:false,rugged:false,vol:0,v24:0,ve:0,addr:rAddr(44)};
   makeIdentity(c);
   c.supply=tier==='meme'?1e9:pick([1e8,5e8,1e9]);
   const mcap0=logU(...TT.mcap);
   c.p0=mcap0/c.supply;c.price=c.p0;c.L0=Math.log(c.p0);
   c.liq0=mcap0*rand(...TT.liqR);
   c.sig=rand(...TT.sig)*(fate==='moon'||fate==='great'?1.2:1);c.theta=TT.theta;c.beta=TT.beta;c.jump=TT.jump;
-  c.T=Math.round(rand(...LIFE[fate])*(tier==='util'?1.5:tier==='alt'?1.2:1));
-  c.decay=DECAY[fate];
+  c.s2i=TT.s2*rand(.7,1.3)*Math.sqrt(1-(1-TH2)*(1-TH2));
+  c.T=opts.T||Math.round(logU(...LIFE[fate])*(tier==='util'?1.5:tier==='alt'?1.2:1));
   switch(fate){
     case'rug':c.Lp=Math.log(logU(1.2,6))*sc;c.k=rand(.8,1.6);c.ur=rand(.3,.85);c.Lfin=Math.log(rand(.002,.05));break;
     case'dud':c.L=Math.log(rand(.15,.8))*sc;c.k=rand(1.4,3);break;
@@ -386,19 +422,24 @@ function makeCoin(opts={}){
     case'great':c.L=Math.log(logU(6,40))*sc;c.k=rand(1.2,2.4);break;
     case'moon':c.L=Math.log(logU(60,1200))*sc;c.k=rand(2.2,3.4);break;
   }
+  // what happens after the run: winners give back part of the gain, losers keep bleeding, flats drift
+  c.fT=RETRACE[fate]?-c.L*rand(...RETRACE[fate]):fate==='dud'?Math.log(rand(.4,.85)):fate==='flat'?Math.log(rand(.8,1.05)):0;
+  c.fTau=rand(7200,43200);
+  // how long it stays listed once it is done (rugs: after the rug)
+  c.Tl=fate==='rug'?rand(1800,5400):c.T*rand(.1,.3)+1800;
   c.wa=rand(.02,.09)*(fate==='flat'?1.2:1)*(1+Math.min(Math.abs(c.L||c.Lp||0),3)*.3);c.wf=rand(2,6);c.wp=rand(0,6.28);
-  // visible "clues" — correlated with fate, but noisy on purpose
+  // visible "clues", correlated with fate but noisy on purpose
   c.top10=fate==='rug'?rand(35,82):rand(8,62);
   c.mintOn=Math.random()<(fate==='rug'?.7:.1);
   c.freezeOn=Math.random()<(fate==='rug'?.4:.08);
   c.h0=tier==='meme'?randi(40,900):tier==='alt'?randi(2000,40000):randi(5000,150000);
   c.about=pick(ABOUT[tier]);
-  c.h=[c.price];
+  c.h=[c.price];c.hm=[];c.hh=[];
   return c;
 }
 const liqOf=c=>c.liq0*Math.pow(clamp(c.price/c.p0,.02,1000),.75)*(c.rugged?.02:1);
 const poolQ=c=>Math.max(liqOf(c)/2,1);
-const holdersOf=c=>Math.round(c.h0*Math.pow(clamp(c.price/c.p0,.3,300),.45)*(1+c.age/Math.max(c.T,1)*.5));
+const holdersOf=c=>Math.round(c.h0*Math.pow(clamp(c.price/c.p0,.3,300),.45)*(1+Math.min(c.age/Math.max(c.T,1),2)*.5));
 
 function planLog(c){
   const u=c.age/c.T,uc=Math.min(u,1);
@@ -415,66 +456,103 @@ function planLog(c){
   return c.L*s+wave;
 }
 
-function stepCoin(c,rSol){
-  c.age++;
-  c.sv+=-.03*c.sv+.1*randn();
+function stepCoin(c,rSol,dt){
+  const a0=c.age;c.age+=dt;
+  let A,K;
+  [A,K]=arK(.97,dt);c.sv=A*c.sv+.1*K*randn();                 // volatility clustering
   const vm=Math.exp(.6*c.sv);
-  c.n+=-c.theta*c.n+c.sig*vm*randn()*(c.dead?.12:1);
-  if(!c.dead&&Math.random()<c.jump)c.n+=(Math.random()<.5?-1:1)*rand(.05,.2)*(c.tier==='meme'?1:.35);
-  if(!c.dead)c.mk+=c.beta*rSol;
-  c.imp*=.965;
-  if(c.age>c.T&&!c.dead)c.fade-=c.decay*(.6+Math.random()*.8);
+  [A,K]=arK(1-c.theta,dt);c.n=A*c.n+c.sig*vm*K*randn()*(c.dead?.12:1);   // fast noise, reverts in ~20s
+  [A,K]=arK(1-TH2,dt);c.n2=A*c.n2+c.s2i*vm*K*randn()*(c.dead?.3:1);      // slow drift, reverts in ~40 min
+  if(!c.dead){
+    const nj=dt===1?(Math.random()<c.jump?1:0):pois(c.jump*dt);
+    for(let j=0;j<nj;j++)c.n+=(Math.random()<.5?-1:1)*rand(.05,.2)*(c.tier==='meme'?1:.35)*(dt===1?1:Math.pow(1-c.theta,Math.random()*dt));
+    c.mk+=c.beta*rSol;
+  }
+  c.imp*=Math.pow(.965,dt);                                      // your own trade's price effect fades
+  if(c.age>c.T&&!c.rugged){const over=Math.min(dt,c.age-c.T);c.fade+=(c.fT-c.fade)*(1-Math.exp(-over/c.fTau))}
   if(c.fate==='rug'&&!c.rugged&&c.age>=c.ur*c.T){c.rugged=true;c.dead=true;c.theta=.25;c.justRugged=true}
   const prev=c.price;
-  c.price=Math.exp(c.L0+planLog(c)+c.n+c.imp+c.mk+c.fade);
-  const dl=Math.abs(Math.log(c.price/prev));
-  const v=liqOf(c)*(.004+2.2*dl)*(.4+Math.random())*.15;
-  c.vol+=v;c.ve=c.ve*.95+v*.05;
-  c.h.push(c.price);
-  if(c.h.length>HCAP)c.h.splice(0,200);
+  c.price=Math.exp(c.L0+planLog(c)+c.n+c.n2+c.imp+c.mk+c.fade);
+  const act=dt===1?Math.abs(Math.log(c.price/prev)):.8*c.sig*vm;
+  const v=liqOf(c)*(.004+2.2*act)*(dt===1?(.4+Math.random()):.9)*.0025*dt*(c.dead?.1:1);
+  c.vol+=v;c.v24=c.v24*Math.exp(-dt/86400)+v;
+  const e=Math.pow(.95,dt);c.ve=c.ve*e+(v/dt)*(1-e);
 }
-function stepSol(){
-  const s=M.sol;
-  s.reg+=-.01*s.reg+.00001*randn();
-  s.sv+=-.02*s.sv+.06*randn();
-  let r=s.reg+.0005*Math.exp(.6*s.sv)*randn()-.0002*Math.log(s.price/150);
-  if(Math.random()<.0008)r+=(Math.random()<.5?-1:1)*rand(.004,.012);
-  s.price*=Math.exp(r);
-  s.h.push(s.price);if(s.h.length>HCAP)s.h.splice(0,200);
-  return r;
+function stepSol(dt){
+  const s=M.sol,a=.995,sr=5.5e-7;let A,K;
+  [A,K]=arK(.98,dt);s.sv=A*s.sv+.06*K*randn();
+  const vm=Math.exp(.6*s.sv);
+  s.anc+=.00008*Math.sqrt(dt)*randn();                          // where SOL "wants" to be; wanders ~2.4% a day
+  // short trends lasting a few minutes: an AR(1) drift, summed exactly over the step
+  const r0=s.reg;let drift;
+  if(dt===1){s.reg=a*r0+sr*randn();drift=s.reg}
+  else{A=Math.pow(a,dt);
+    const v=dt-2*a*(1-A)/(1-a)+a*a*(1-A*A)/(1-a*a);
+    drift=r0*a*(1-A)/(1-a)+sr/(1-a)*Math.sqrt(Math.max(v,0))*randn();
+    s.reg=A*r0+sr*Math.sqrt((1-A*A)/(1-a*a))*randn()}
+  const x=Math.log(s.price),kap=.00002,e=Math.exp(-kap*dt);
+  let x2=s.anc+(x-s.anc)*e+drift+.00018*vm*Math.sqrt((1-e*e)/(2*kap))*randn();
+  const nj=dt===1?(Math.random()<.0008?1:0):pois(.0008*dt);
+  for(let j=0;j<nj;j++)x2+=(Math.random()<.5?-1:1)*rand(.004,.012);
+  s.price=Math.exp(x2);
+  return x2-x;
 }
-function spawn(){const c=makeCoin();M.coins.push(c);REG[c.id]=c;return c}
+// record closes into the three history buffers
+function rec(t,dt){
+  if(dt===1){t.h.push(t.price);if(t.h.length>SEC_KEEP+240)t.h.splice(0,t.h.length-SEC_KEEP-1)}
+  if(dt<=60&&M.t%60===0){t.hm.push(t.price);if(t.hm.length>MIN_KEEP+240)t.hm.splice(0,t.hm.length-MIN_KEEP)}
+  if(M.t%3600===0){t.hh.push(t.price);if(t.hh.length>HR_KEEP+48)t.hh.splice(0,t.hh.length-HR_KEEP)}
+}
+function spawn(opts){const c=makeCoin(opts);M.coins.push(c);REG[c.id]=c;return c}
 function cull(){
-  const MAXC=55;
-  if(M.coins.length<=MAXC)return;
   const keep=c=>W&&(W.H[c.id]||c.id===S.detail||c.id===S.swap.from||c.id===S.swap.to);
-  const cand=M.coins.filter(c=>!keep(c)&&(c.age>c.T*1.05||(c.rugged&&c.age>c.ur*c.T+120)));
-  cand.sort((a,b)=>b.age/b.T-a.age/a.T);
-  const rm=new Set(cand.slice(0,M.coins.length-MAXC).map(c=>c.id));
-  if(M.coins.length-rm.size>90){
-    M.coins.filter(c=>!rm.has(c.id)&&!keep(c)).sort((a,b)=>b.age-a.age).slice(0,M.coins.length-rm.size-90).forEach(c=>rm.add(c.id));
-  }
+  const done=c=>c.rugged?c.age>c.ur*c.T+c.Tl:c.age>c.T+c.Tl;
+  const rm=new Set(M.coins.filter(c=>!keep(c)&&done(c)).map(c=>c.id));
+  const MAXC=160; // safety valve only; normal churn keeps the list near 100
+  const left=M.coins.length-rm.size;
+  if(left>MAXC)M.coins.filter(c=>!rm.has(c.id)&&!keep(c)).sort((a,b)=>b.age/b.T-a.age/a.T).slice(0,left-MAXC).forEach(c=>rm.add(c.id));
   if(rm.size){M.coins=M.coins.filter(c=>!rm.has(c.id));reindex()}
 }
-function stepAll(){
-  M.t++;
-  const r=stepSol();
-  for(const c of M.coins)stepCoin(c,r);
-  if(Math.random()<SPAWN)spawn();
-  if(M.t%15===0)cull();
+function stepAll(dt=1){
+  M.t+=dt;
+  const r=stepSol(dt);rec(M.sol,dt);
+  for(const c of M.coins){stepCoin(c,r,dt);rec(c,dt)}
+  if(dt<3600){const k=dt===1?(Math.random()<SPAWN?1:0):pois(SPAWN*dt);for(let i=0;i<k;i++)spawn()}
+  if(dt>1||M.t%15===0)cull();
 }
-function seedMarket(){
-  M=newMarket();
-  for(let i=0;i<600;i++)stepSol();
-  M.sol.price=M.sol.h[M.sol.h.length-1];
-  for(let i=0;i<48;i++){
-    const moon=i===0;             // a fresh session always has one moonshot mid-run to chase
-    const c=makeCoin(moon?{fate:'moon'}:{});
-    const steps=moon?randi(Math.floor(c.T*.12),Math.floor(c.T*.35)):randi(0,Math.min(1500,Math.floor(c.T*1.15)));
-    for(let j=0;j<steps;j++)stepCoin(c,.0006*randn());
-    M.coins.push(c);
+// Replay G seconds of market time. Deterministic structure, random path, consistent with everything before it.
+async function advance(G,prog,hook){
+  G=Math.floor(Math.min(G,MAX_CATCHUP));if(G<=0)return;
+  const WEEK=MIN_KEEP*60,HOUR=SEC_KEEP;
+  let rem=G,hourly=false,macro=false,lastY=performance.now();
+  const tick=async dt=>{
+    stepAll(dt);rem-=dt;if(hook)hook();
+    if(performance.now()-lastY>35){lastY=performance.now();if(prog)prog(1-rem/G);await new Promise(r=>setTimeout(r,0))}
+  };
+  if(rem>WEEK+2*HOUR){                       // more than a week: hourly steps for the oldest part
+    while(M.t%60&&rem>WEEK)await tick(1);
+    while(M.t%3600&&rem>WEEK)await tick(60);
+    while(rem-3600>=WEEK){await tick(3600);hourly=true}
+    macro=true;
   }
-  reindex();
+  if(hourly)for(const t of allTok())t.hm=[];  // minute closes older than a week are out of range anyway
+  if(rem>HOUR+120){                          // minute steps up to the final hour
+    while(M.t%60&&rem>HOUR)await tick(1);
+    while(rem-60>=HOUR){await tick(60);macro=true}
+  }
+  if(macro)for(const t of allTok())t.h=[t.price]; // second-level history restarts for the final hour
+  while(rem>0)await tick(1);
+  if(prog)prog(1);
+}
+// A new wallet gets a market that has already been running for three days, so charts have real history.
+async function seedMarket(prog){
+  M=newMarket();reindex();
+  const WARM=3*86400;
+  const mT=Math.round(logU(...LIFE.moon));                // a fresh wallet always has one moonshot mid-run to chase
+  const at=WARM-Math.min(Math.round(mT*rand(.12,.35)),WARM-7200);
+  let placed=false;
+  await advance(WARM,prog,()=>{if(!placed&&M.t>=at){placed=true;spawn({fate:'moon',T:mT})}});
+  M.coins.forEach(c=>c.justRugged=false);
 }
 
 /* ============================================================
@@ -489,7 +567,50 @@ function newWallet(){
 const snap=t=>({id:t.id,sym:t.sym,name:t.name,ic:t.ic});
 const bal=id=>(W.H[id]&&W.H[id].amt)||0;
 function portfolioValue(){let v=0;for(const id in W.H){const t=T(id);if(t)v+=W.H[id].amt*t.price}return v}
-function chg(t,w){const h=t.h;if(!h||h.length<2)return 0;const n=h.length,i=w===0?0:Math.max(0,n-1-w);return h[n-1]/h[i]-1}
+// Where each history buffer starts, in simulated seconds (its last point is the latest close)
+function bufs(t){
+  const tm=M.t-M.t%60,th=M.t-M.t%3600;
+  return[{a:t.h,res:1,start:M.t-(t.h.length-1),now:false},
+         {a:t.hm,res:60,start:tm-(t.hm.length-1)*60,now:true},
+         {a:t.hh,res:3600,start:th-(t.hh.length-1)*3600,now:true}].filter(b=>b.a.length);
+}
+// price s seconds ago, from the finest buffer that reaches that far back
+function histAt(t,s){
+  if(s<=0||!t.h)return t.price;
+  const want=M.t-s;
+  for(const b of bufs(t))if(b.start<=want){const i=b.a.length-1-Math.floor((b.start+(b.a.length-1)*b.res-want)/b.res);return b.a[Math.max(0,i)]}
+  return earliest(t);
+}
+function earliest(t){if(t.kind==='coin')return t.p0;const B=bufs(t);return B.length?B.reduce((x,y)=>y.start<x.start?y:x).a[0]:t.price}
+// % change over w seconds (0 = since launch / all history)
+function chg(t,w){
+  if(t.kind==='stable')return 0;
+  const b=(w===0||(t.kind==='coin'&&w>=t.age))?earliest(t):histAt(t,w);
+  return b>0?t.price/b-1:0;
+}
+// points + their timestamps covering the last `win` seconds (0 = everything)
+function series(t,win){
+  const age=t.kind==='coin'?t.age:Infinity,span=win?Math.min(win,age):age,want=M.t-span;
+  const B=bufs(t);if(!B.length)return{pts:[t.price,t.price],ts:[M.t-1,M.t]};
+  const b=B.find(b=>b.start<=want+b.res)||B.reduce((x,y)=>y.start<x.start?y:x);
+  const from=Math.max(0,Math.ceil((want-b.start)/b.res));
+  const pts=b.a.slice(from),ts=pts.map((_,i)=>b.start+(from+i)*b.res);
+  if(b.now&&ts[ts.length-1]<M.t){pts.push(t.price);ts.push(M.t)}
+  if(t.kind==='coin'&&want<=t.bt&&ts[0]>t.bt){pts.unshift(t.p0);ts.unshift(t.bt)}   // include the launch price
+  if(pts.length<2){pts.unshift(pts[0]);ts.unshift(ts[0]-1)}
+  return{pts,ts};
+}
+// thin a series for drawing: keep each bucket's low and high in order, so spikes and crashes survive
+function thin(S_,n){
+  const{pts,ts}=S_,L=pts.length;if(L<=n*2)return S_;
+  const P=[pts[0]],Tt=[ts[0]],bs=(L-2)/n;
+  for(let k=0;k<n;k++){
+    const a=1+Math.floor(k*bs),b=Math.min(L-1,1+Math.floor((k+1)*bs));let lo=a,hi=a;
+    for(let i=a;i<b;i++){if(pts[i]<pts[lo])lo=i;if(pts[i]>pts[hi])hi=i}
+    const o=lo===hi?[lo]:lo<hi?[lo,hi]:[hi,lo];for(const i of o){P.push(pts[i]);Tt.push(ts[i])}
+  }
+  P.push(pts[L-1]);Tt.push(ts[L-1]);return{pts:P,ts:Tt};
+}
 
 function quote(fromId,toId,amt){
   const f=T(fromId),t=T(toId);
@@ -521,8 +642,8 @@ function execSwap(fromId,toId,amt,minOut){
   const ht=W.H[toId]||(W.H[toId]={amt:0,cost:0});
   ht.amt+=q.out;ht.cost+=q.usdN;
   for(const id in W.H)if(id!=='SOL'&&W.H[id].amt<1e-9)delete W.H[id];
-  if(q.f.kind==='coin'){const Rq=poolQ(q.f);q.f.imp=clamp(q.f.imp-Math.log(1+amt/(Rq/q.f.price)),-3,3);q.f.vol+=q.usdG}
-  if(q.t.kind==='coin'){q.t.imp=clamp(q.t.imp+Math.log(1+q.usdN/q.Rqt),-3,3);q.t.vol+=q.usdN}
+  if(q.f.kind==='coin'){const Rq=poolQ(q.f);q.f.imp=clamp(q.f.imp-Math.log(1+amt/(Rq/q.f.price)),-3,3);q.f.vol+=q.usdG;q.f.v24+=q.usdG}
+  if(q.t.kind==='coin'){q.t.imp=clamp(q.t.imp+Math.log(1+q.usdN/q.Rqt),-3,3);q.t.vol+=q.usdN;q.t.v24+=q.usdN}
   const pnl=q.f.kind==='stable'?null:q.usdN-costOut;
   addAct({type:'swap',from:snap(q.f),fromAmt:amt,to:snap(q.t),toAmt:q.out,usd:q.usdG,fee:q.fee,pnl});
   return{ok:true,q,pnl};
@@ -551,26 +672,145 @@ function deposit(id,usd){
 
 /* ============================================================
    PERSISTENCE
+   ------------------------------------------------------------
+   Saved to IndexedDB (localStorage tops out around 5 MB).
+   The save is split into many small records written in ONE
+   transaction: Chrome moves any value over ~64 KB out to a
+   separate blob file, and if the app is killed mid-write that
+   file can be left unreadable, which would lose the wallet.
+   Small records stay inline, and the single transaction means
+   a save either fully lands or leaves the previous one intact.
+   History buffers are stored as Float32 (~7 significant
+   digits, plenty for charts); live prices are full precision.
+   The save stamps the wall-clock time, so reopening the app
+   replays exactly the time you were gone.
    ============================================================ */
-function save(){
-  try{
-    const m={...M,coins:M.coins.map(c=>({...c,h:c.h.map(x=>+x.toPrecision(6))})),sol:{...M.sol,h:M.sol.h.map(x=>+x.toPrecision(6))}};
-    localStorage.setItem(KEY,JSON.stringify({v:1,t:Date.now(),W,M:m,S:{speed:S.speed,slip:S.slip,refresh:S.refresh}}));
-  }catch(e){}
+const CH_S=16000, CH_F=12000;     // chars per text record, floats per history record (both < 40 KB)
+const Store={
+  db:undefined,
+  open(){
+    if(this.db!==undefined)return Promise.resolve(this.db);
+    return new Promise(res=>{
+      try{
+        if(!self.indexedDB)return res(this.db=null);
+        const r=indexedDB.open('ghast',1);
+        r.onupgradeneeded=()=>r.result.createObjectStore('kv');
+        r.onsuccess=()=>res(this.db=r.result);
+        r.onerror=r.onblocked=()=>res(this.db=null);
+      }catch(e){res(this.db=null)}
+    });
+  },
+  // replace the whole save atomically
+  async write(recs){
+    const db=await this.open();
+    if(!db)return false;
+    return new Promise(res=>{try{
+      const tx=db.transaction('kv','readwrite'),st=tx.objectStore('kv');
+      st.clear();for(const k in recs)st.put(recs[k],k);
+      tx.oncomplete=()=>res(true);tx.onerror=tx.onabort=()=>res(false);
+    }catch(e){res(false)}});
+  },
+  async read(){
+    const db=await this.open();
+    if(!db)return undefined;
+    return new Promise(res=>{try{
+      const tx=db.transaction('kv'),st=tx.objectStore('kv'),out={};
+      const hq=st.get('head');
+      hq.onsuccess=()=>{
+        const h=hq.result;if(!h||h.v!==3)return res(undefined);
+        out.head=h;out.s=[];out.f=[];
+        for(let i=0;i<h.ns;i++){const q=st.get('s'+i);q.onsuccess=()=>out.s[i]=q.result}
+        for(let i=0;i<h.nf;i++){const q=st.get('f'+i);q.onsuccess=()=>out.f[i]=q.result}
+      };
+      tx.oncomplete=()=>res(out.head?out:undefined);tx.onerror=tx.onabort=()=>res(undefined);
+    }catch(e){res(undefined)}});
+  },
+  async clear(){try{localStorage.removeItem('ghast.state')}catch(e){}return this.write({})}
+};
+function packState(){
+  const arrs=[];let off=0;
+  const ref=a=>{arrs.push(a);const r=[off,a.length];off+=a.length;return r};
+  const pk=t=>({...t,h:ref(t.h),hm:ref(t.hm),hh:ref(t.hh)});
+  const meta={wall:Date.now(),M:{t:M.t,seq:M.seq,sol:pk(M.sol),coins:M.coins.map(pk)},W,S:{speed:S.speed,slip:S.slip,refresh:S.refresh}};
+  const all=new Float32Array(off);let p=0;for(const a of arrs){all.set(a,p);p+=a.length}
+  return{meta,all};
 }
-function loadSaved(){
+function toRecords({meta,all}){
+  const js=JSON.stringify(meta),recs={};let ns=0,nf=0;
+  for(let i=0;i<js.length||i===0;i+=CH_S)recs['s'+(ns++)]=js.slice(i,i+CH_S);
+  for(let i=0;i<all.length;i+=CH_F)recs['f'+(nf++)]=all.slice(i,i+CH_F);
+  recs.head={v:3,ns,nf,wall:meta.wall};
+  return recs;
+}
+function fromRecords(r){
+  if(r.s.length!==r.head.ns||r.f.length!==r.head.nf||r.s.some(x=>typeof x!=='string')||r.f.some(x=>!x))return null;
+  const meta=JSON.parse(r.s.join(''));
+  let n=0;for(const f of r.f)n+=f.length;
+  const all=new Float32Array(n);let p=0;for(const f of r.f){all.set(f,p);p+=f.length}
+  const uk=t=>{for(const k of['h','hm','hh']){const[o,l]=t[k];t[k]=Array.from(all.subarray(o,o+l))}if(!t.h.length)t.h=[t.price];return t};
+  meta.M.sol=uk(meta.M.sol);meta.M.coins=meta.M.coins.map(uk);
+  return meta;
+}
+let saving=null,saveAgain=false;
+function save(){
+  if(!M||!W||S.resetting||S.catching)return Promise.resolve();
+  if(saving){saveAgain=true;return saving}
+  const snap=packState();   // snapshot now, so wall time and market state always match
+  saving=(async()=>{
+    let ok=await Store.write(toRecords(snap));
+    if(!ok&&Store.db===null){ // no IndexedDB at all: smaller JSON copy with 15 min of per-second history
+      try{
+        const{meta,all}=snap,cp=JSON.parse(JSON.stringify(meta));
+        const put=t=>{for(const k of['h','hm','hh']){const[o,l]=t[k];let a=Array.from(all.subarray(o,o+l),x=>+x.toPrecision(6));if(k==='h')a=a.slice(-900);t[k]=a}};
+        put(cp.M.sol);cp.M.coins.forEach(put);
+        localStorage.setItem('ghast.state',JSON.stringify(cp));ok=true;
+      }catch(e){}
+    }
+    saving=null;
+    if(ok&&!S.migrated){S.migrated=true;try{localStorage.removeItem(KEY)}catch(e){}}
+    if(saveAgain){saveAgain=false;return save()}
+  })();
+  return saving;
+}
+// The first version kept up to 3000 one-second points per token in localStorage and nothing longer.
+function migrateV1(d){
+  const up=t=>{
+    t.h=(t.h&&t.h.length?t.h:[t.price]).slice(-(SEC_KEEP+1));
+    t.hm=[];const n=t.h.length;for(let i=0;i<n;i++)if((d.M.t-(n-1-i))%60===0)t.hm.push(t.h[i]);
+    t.hh=[];return t;
+  };
+  const sol=up(d.M.sol);sol.anc=Math.log(sol.price);sol.reg=0;sol.sv=sol.sv||0;
+  const coins=d.M.coins.map(c=>{
+    up(c);c.bt=d.M.t-c.age;c.n2=0;c.v24=c.vol||0;
+    c.s2i=TIERS[c.tier].s2*Math.sqrt(1-(1-TH2)*(1-TH2));
+    c.fT=c.fade||0;c.fTau=43200;          // old coins had an endless linear decay; freeze it where it is
+    c.Tl=c.fate==='rug'?1800:c.T*.2+1800;
+    delete c.born;delete c.decay;return c;
+  });
+  return{wall:d.t,M:{t:d.M.t,seq:d.M.seq,sol,coins},W:d.W,S:d.S||{}};
+}
+async function loadSaved(){
+  try{
+    const r=await Store.read();
+    const d=r&&fromRecords(r);
+    if(d&&d.M&&d.W&&d.M.sol&&Array.isArray(d.M.coins))return d;
+  }catch(e){}
+  try{ // fallback copy (browsers without IndexedDB)
+    const raw=localStorage.getItem('ghast.state');
+    if(raw){const d=JSON.parse(raw);if(d&&d.M&&d.W)return d}
+  }catch(e){}
   try{
     const raw=localStorage.getItem(KEY);if(!raw)return null;
     const d=JSON.parse(raw);
     if(d.v!==1||!d.M||!d.W||!d.M.sol||!Array.isArray(d.M.coins))return null;
-    return d;
+    return migrateV1(d);
   }catch(e){return null}
 }
 
 /* ============================================================
    UI STATE + SHELL
    ============================================================ */
-const S={tab:'home',speed:1,slip:.05,refresh:30,lastR:0,ex:'trend',win:300,q:'',pnl:'session',base:0,swap:{from:'SOL',to:'USDC',amt:''},detail:null,tf:300,hover:null,exIds:[],exAt:0,exDirty:true,actDirty:true,actC:0,busy:false};
+const S={tab:'home',speed:1,slip:.05,refresh:30,lastR:0,migrated:false,resetting:false,catching:false,ex:'trend',win:3600,q:'',pnl:'session',base:0,swap:{from:'SOL',to:'USDC',amt:''},detail:null,tf:300,hover:null,exIds:[],exAt:0,exDirty:true,actDirty:true,actC:0,busy:false};
 const NAV=[['home','Home','home'],['swap','Swap','swap'],['explore','Explore','explore'],['activity','Activity','clock']];
 
 function buildNav(){
@@ -677,7 +917,7 @@ function homeTick(){
   syncRows($('#homeList'),ids,
     ({id})=>{const t=T(id);const e=el(`<div class="row"><span>${iconHTML(t.ic,44)}</span><div class="mid"><div class="t1"></div><div class="t2"></div></div><div class="rt"><div class="t1"></div><div class="t2"></div></div></div>`);e.onclick=()=>openDetail(id);return e},
     (e,{id})=>{
-      const t=T(id),h=W.H[id],val=h.amt*t.price,c=t.kind==='stable'?0:chg(t,300);
+      const t=T(id),h=W.H[id],val=h.amt*t.price,c=t.kind==='stable'?0:chg(t,86400);
       const n=q(e,'.mid .t1');setText(n,t.name);
       if(t.rugged&&!n.querySelector('.tag'))n.insertAdjacentHTML('beforeend','<span class="tag r">RUGGED</span>');
       setText(q(e,'.mid .t2'),`${fmtAmt(h.amt)} ${t.sym}`);
@@ -695,14 +935,15 @@ function buildExplore(){
     <h1>Explore</h1>
     <div class="search">${ic('search',18)}<input id="exQ" placeholder="Search tokens" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
     <div class="chips" id="exTabs">${[['trend','Trending'],['new','New'],['gain','Gainers'],['lose','Losers']].map(([k,l])=>`<button class="chip${S.ex===k?' on':''}" data-a="ex" data-v="${k}">${l}</button>`).join('')}</div>
-    <div class="rowhead"><span class="lab">Price change over</span><div class="chips sm" id="exWin">${[[60,'1m'],[300,'5m'],[900,'15m'],[0,'All']].map(([k,l])=>`<button class="chip${S.win===k?' on':''}" data-a="win" data-v="${k}">${l}</button>`).join('')}</div></div>
+    <div class="rowhead"><span class="lab">Price change over</span><div class="chips sm" id="exWin">${[[300,'5m'],[3600,'1h'],[86400,'24h'],[0,'All']].map(([k,l])=>`<button class="chip${S.win===k?' on':''}" data-a="win" data-v="${k}">${l}</button>`).join('')}</div></div>
     <div id="exList"></div>
     <div class="empty" id="exEmpty" style="display:none">No tokens match your search.</div>
   </div>`;
   $('#exQ').addEventListener('input',e=>{S.q=e.target.value;S.exDirty=true;exTick()});
 }
 function exTick(){
-  if(S.exDirty||M.t%5===0||!S.exIds.length){
+  if(S.exDirty||M.t-S.exAt>=5||!S.exIds.length){
+    S.exAt=M.t;
     let list=M.coins.slice();
     const qq=S.q.trim().toLowerCase();
     if(qq)list=list.filter(c=>c.name.toLowerCase().includes(qq)||c.sym.toLowerCase().includes(qq));
@@ -712,7 +953,7 @@ function exTick(){
     else if(S.ex==='gain')list.sort((a,b)=>ch(b)-ch(a));
     else list.sort((a,b)=>ch(a)-ch(b));
     if(!qq&&S.ex!=='lose')list.sort((a,b)=>(a.rugged?1:0)-(b.rugged?1:0)); // dead tokens never headline Trending/New/Gainers (stable sort keeps order otherwise)
-    S.exIds=list.map(c=>c.id);S.exDirty=false;
+    S.exIds=list.slice(0,qq?list.length:60).map(c=>c.id);S.exDirty=false;
   }
   const items=S.exIds.filter(id=>T(id)).map(id=>({id}));
   $('#exEmpty').style.display=items.length?'none':'block';
@@ -722,7 +963,7 @@ function exTick(){
       const c=T(id),ch=chg(c,S.win);
       const n=q(e,'.mid .t1');
       if(n.firstChild===null||n.firstChild.textContent!==c.name)n.textContent=c.name;
-      const wantTag=c.rugged?'r':(c.age<90?'n':'');
+      const wantTag=c.rugged?'r':(c.age<1800?'n':'');
       const tag=n.querySelector('.tag');
       if(wantTag&&!tag)n.insertAdjacentHTML('beforeend',`<span class="tag ${wantTag}">${wantTag==='r'?'RUGGED':'NEW'}</span>`);
       else if(!wantTag&&tag)tag.remove();
@@ -730,7 +971,7 @@ function exTick(){
       setText(q(e,'.mid .t2'),`${c.sym} · MC ${fmtC(c.price*c.supply)}`);
       setText(q(e,'.rt .t1'),fmtPrice(c.price));
       const r2=q(e,'.rt .t2');setText(r2,fmtPct(ch));r2.className='t2 '+(ch>0.00005?'up':ch<-0.00005?'dn':'');
-      let pts=S.win?c.h.slice(-S.win):c.h;const st=Math.max(1,Math.ceil(pts.length/60));if(st>1){const o=[];for(let i=pts.length-1;i>=0;i-=st)o.push(pts[i]);pts=o.reverse()}
+      const pts=thin(series(c,S.win),28).pts;
       const p=paths(pts,60,26,2);
       const pe=q(e,'.spark path');pe.setAttribute('d',p.line);pe.setAttribute('stroke',pts[pts.length-1]>=pts[0]?'#2fe08b':'#ff5c5c');
     });
@@ -739,10 +980,10 @@ function exTick(){
 /* ============================================================
    TOKEN DETAIL
    ============================================================ */
-const TFS=[['1M',60],['5M',300],['15M',900],['1H',3600],['All',0]];
+const TFS=[['5M',300],['1H',3600],['1D',86400],['1W',604800],['All',0]];
 function openDetail(id){
   const t=T(id);if(!t)return;
-  S.detail=id;S.hover=null;S.tf=t.kind==='coin'?0:300;
+  S.detail=id;S.hover=null;S.tf=t.kind==='coin'?0:86400;
   const coin=t.kind==='coin',stable=t.kind==='stable';
   $('#detail').innerHTML=`
   <div class="dhead"><button class="ib" data-a="back" aria-label="Back">${ic('back',24)}</button><div class="ttl">${t.name}</div><span style="width:40px"></span></div>
@@ -760,7 +1001,7 @@ function openDetail(id){
       <div><div class="k">Avg. cost</div><div class="v" id="pAvg"></div></div><div><div class="k">Profit / loss</div><div class="v" id="pPnl"></div></div></div></div>
     ${coin?`<div class="dsec"><h3>Market</h3><div class="grid2">
       <div class="stat"><div class="k">Market cap</div><div class="v" id="sMc"></div></div><div class="stat"><div class="k">Liquidity</div><div class="v" id="sLq"></div></div>
-      <div class="stat"><div class="k">Volume</div><div class="v" id="sVo"></div></div><div class="stat"><div class="k">Holders</div><div class="v" id="sHo"></div></div>
+      <div class="stat"><div class="k">Volume 24h</div><div class="v" id="sVo"></div></div><div class="stat"><div class="k">Holders</div><div class="v" id="sHo"></div></div>
       <div class="stat"><div class="k">Token age</div><div class="v" id="sAg"></div></div><div class="stat"><div class="k">Top 10 holders</div><div class="v" id="sTop"></div></div></div></div>
     <div class="dsec"><h3>Ghast Shield</h3><div class="card shield"><div class="hd"><span style="display:flex;gap:8px;align-items:center"><span style="color:var(--ac)">${ic('shield',20)}</span>Risk check</span><span class="risk" id="rk"></span></div>
       <div class="kv"><span>Mint authority</span><b id="sMint"></b></div><div class="kv" style="padding-top:0"><span>Freeze authority</span><b id="sFrz"></b></div>
@@ -786,9 +1027,8 @@ function detailTick(){
   const id=S.detail;if(!id)return;
   const t=T(id);if(!t){closeDetail();return}
   const coin=t.kind==='coin';
-  let all=t.h||[1,1];
-  const pts=S.tf?all.slice(-S.tf):all.slice();
-  if(pts.length<2)pts.push(pts[0]);
+  const ser=t.kind==='stable'?{pts:[1,1],ts:[M.t-1,M.t]}:thin(series(t,S.tf),170);
+  const pts=ser.pts;
   const first=pts[0],last=pts[pts.length-1];
   const idx=S.hover==null?pts.length-1:Math.round(S.hover*(pts.length-1));
   const shown=pts[idx];
@@ -797,7 +1037,7 @@ function detailTick(){
   const col=last>=first?'#2fe08b':'#ff5c5c';
   const pce=$('#dPc');
   const tfl=(TFS.find(x=>x[1]===S.tf)||['All'])[0];
-  const lab=S.hover==null?tfl:fmtAge(pts.length-1-idx)+' ago';
+  const lab=S.hover==null?(S.tf===0&&coin?'Since launch':tfl):(M.t-ser.ts[idx]<1?'Now':fmtAge(M.t-ser.ts[idx])+' ago');
   if(t.kind==='stable'){pce.innerHTML=`<span class="mut">Pegged to USD</span>`}
   else pce.innerHTML=`<span class="${up?'up':'dn'}">${up?'▲':'▼'} ${fmtPct(Math.abs(pc),false)}</span><small>${lab}</small>`;
   const PX=8,p=paths(pts,360,210,16,PX);
@@ -823,7 +1063,7 @@ function detailTick(){
   }else pos.style.display='none';
   // stats
   if(coin){
-    setText($('#sMc'),fmtC(t.price*t.supply));setText($('#sLq'),fmtC(liqOf(t)));setText($('#sVo'),fmtC(t.vol));
+    setText($('#sMc'),fmtC(t.price*t.supply));setText($('#sLq'),fmtC(liqOf(t)));setText($('#sVo'),fmtC(t.v24));
     setText($('#sHo'),nf(holdersOf(t),0));setText($('#sAg'),fmtAge(t.age));setText($('#sTop'),t.top10.toFixed(1)+'%');
     const m=$('#sMint'),f=$('#sFrz');
     setText(m,t.mintOn?'Enabled':'Revoked');m.className=t.mintOn?'dn':'up';
@@ -936,12 +1176,12 @@ function reviewSwap(){
       setTimeout(()=>{                                 // ~0.7s "on-chain" delay: price can move against you
         S.busy=false;
         const r=execSwap(from,to,a,minOut);
+        if(r.ok){save();homeTick();swapTick()}
         const body=sheetBody();if(!body)return;
         if(r.ok){
           S.swap.amt='';renderSwapChips();
           const pl=r.pnl==null?'':`<p style="margin-top:-8px">${r.pnl>=0?'Realised profit':'Realised loss'}: <b class="${r.pnl>=0?'up':'dn'}">${sUSD(r.pnl)}</b></p>`;
           body.innerHTML=`<div class="center"><div class="big-ok" style="background:rgba(47,224,139,.15);color:var(--up)">${ic('check',36,2.4)}</div><h2>Swap complete</h2><p>You received ${fmtAmt(r.q.out)} ${r.q.t.sym}.</p>${pl}<button class="btn" data-a="closeSheet">Done</button><div style="height:8px"></div><button class="btn sec" data-a="toActivity">View activity</button></div>`;
-          save();homeTick();swapTick();
         }else{
           body.innerHTML=`<div class="center"><div class="big-ok" style="background:rgba(255,92,92,.15);color:var(--dn)">${ic('x',34,2.4)}</div><h2>Swap failed</h2><p>${r.err}</p><button class="btn" data-a="closeSheet">Close</button></div>`;
         }
@@ -1056,7 +1296,7 @@ function openSettings(){
       else if(k==='slip'){S.slip=+v;renderSwapChips();save();openSettings()}
       else if(k==='rename'){const n=prompt('Account name',W.name);if(n&&n.trim()){W.name=n.trim().slice(0,20);setText($('#acName'),W.name);save();openSettings()}}
       else if(k==='lock'){closeSheet(true);showLock('lock')}
-      else if(k==='reset'){if(confirm('Reset your wallet and the whole market? This cannot be undone.')){try{localStorage.removeItem(KEY)}catch(_){}location.reload()}}
+      else if(k==='reset'){if(confirm('Reset your wallet and the whole market? This cannot be undone.')){S.resetting=true;try{localStorage.removeItem(KEY)}catch(_){}Store.clear().then(()=>location.reload())}}
     });
   });
 }
@@ -1146,42 +1386,84 @@ function renderTick(){
 }
 let last=Date.now(),carry=0,lastSave=Date.now();
 function loop(){
-  const now=Date.now();
-  carry+=(now-last)/1000*S.speed;last=now;
-  let n=Math.floor(carry);carry-=n;
+  if(S.catching)return;
+  const now=Date.now(),el=(now-last)/1000;last=now;
+  // Back from the background or from sleep: replay the gap at 1x, exactly as if the app had been closed.
+  if(el>20){catchUp(el);return}
+  carry+=el*S.speed;
+  const n=Math.floor(carry);carry-=n;
   if(n<=0)return;
-  n=Math.min(n,1800);
-  for(let i=0;i<n;i++)stepAll();
+  for(let i=0;i<n;i++)stepAll(1);
   notifyRugs();
   /* The market keeps ticking every second underneath, but the screen only
      redraws on the refresh interval, so prices sit still long enough to read. */
   if(!S.refresh||now-S.lastR>=S.refresh*1000){S.lastR=now;renderTick()}
   updAge();
   revTick(); // the review sheet is a live decision screen, never frozen
-  if(now-lastSave>10000){lastSave=now;save()}
+  if(now-lastSave>5000){lastSave=now;save()}
 }
 
-function boot(){
-  const saved=loadSaved();
-  let fresh=false;
+/* ---------- catching up after time away ---------- */
+function catchUI(on,label){
+  let o=$('#catch');
+  if(!on){if(o)o.classList.remove('on');return}
+  if(!o){o=el(`<div id="catch"><div class="logo">${ghast(64)}</div><div class="cl"></div><div class="bar"><i></i></div></div>`);$('#app').appendChild(o)}
+  setText($('.cl',o),label);$('.bar i',o).style.width='0%';o.classList.add('on');
+}
+const catchProg=p=>{const b=$('#catch .bar i');if(b)b.style.width=(p*100).toFixed(1)+'%'};
+async function catchUp(sec,{quiet=false}={}){
+  sec=Math.floor(sec);if(sec<=0)return;
+  S.catching=true;
+  const held=Object.keys(W.H).filter(id=>T(id)&&T(id).kind!=='stable');
+  const before={pv:portfolioValue(),px:Object.fromEntries(held.map(id=>[id,T(id).price]))};
+  M.coins.forEach(c=>c.justRugged=false);
+  const big=sec>90;
+  if(big){catchUI(true,`Catching up on ${fmtDur(sec)} of market`);await new Promise(r=>setTimeout(r,30))}
+  try{await advance(sec,big?catchProg:null)}finally{S.catching=false}
+  last=Date.now();carry=0;
+  const rugs=M.coins.filter(c=>c.justRugged&&W.H[c.id]);M.coins.forEach(c=>c.justRugged=false);
+  catchUI(false);
+  refreshNow();S.exDirty=true;
+  save();
+  if(!quiet&&sec>=600)awaySummary(sec,before,rugs);
+  else for(const c of rugs)toast(`<b>${c.sym}</b> got rugged while you were away.`,'bad','alert',()=>openDetail(c.id));
+}
+function awaySummary(sec,before,rugs){
+  const pv=portfolioValue(),d=pv-before.pv,p=before.pv>0?d/before.pv:0;
+  const rows=Object.keys(before.px).filter(id=>T(id)&&W.H[id]).map(id=>{const t=T(id);return{t,c:t.price/before.px[id]-1,v:W.H[id].amt*t.price}}).sort((a,b)=>b.v-a.v).slice(0,6);
+  const rug=new Set(rugs.map(c=>c.id));
+  openSheet('While you were away',`
+    <p class="away-l">The market ran for ${fmtDur(sec)} without you.</p>
+    <div class="card away"><div class="k">Portfolio</div><div class="v">${fmtUSD(pv)}</div><div class="${d>=0?'up':'dn'}" style="font-weight:600">${sUSD(d)} (${fmtPct(p)})</div></div>
+    ${rows.map(r=>`<div class="row" style="padding-left:2px;padding-right:2px"><span>${iconHTML(r.t.ic,38)}</span><div class="mid"><div class="t1">${r.t.sym}${rug.has(r.t.id)?'<span class="tag r">RUGGED</span>':''}</div><div class="t2">${fmtUSD(r.v)}</div></div><div class="rt"><div class="t1 ${r.c>=0?'up':'dn'}">${fmtPct(r.c)}</div></div></div>`).join('')}
+    <div style="height:14px"></div><button class="btn" data-a="closeSheet">Got it</button>`);
+}
+
+async function boot(){
+  let saved=await loadSaved(),fresh=false,gap=0;
   if(saved){
-    M=saved.M;W=saved.W;S.speed=saved.S&&saved.S.speed||1;S.slip=saved.S&&saved.S.slip||.05;
-    S.refresh=saved.S&&saved.S.refresh!=null?saved.S.refresh:30;
+    M=saved.M;W=saved.W;
+    S.speed=saved.S.speed||1;S.slip=saved.S.slip||.05;S.refresh=saved.S.refresh!=null?saved.S.refresh:30;
     reindex();
-    const el_=Math.min(900,Math.max(0,Math.floor((Date.now()-saved.t)/1000*S.speed)));
-    for(let i=0;i<el_;i++)stepAll();
-    M.coins.forEach(c=>c.justRugged=false);
+    gap=Math.max(0,(Date.now()-saved.wall)/1000);
   }else{
-    seedMarket();W=newWallet();fresh=true;
+    S.catching=true;
+    catchUI(true,'Starting the market');
+    await new Promise(r=>setTimeout(r,30));
+    await seedMarket(catchProg);
+    S.catching=false;catchUI(false);
+    W=newWallet();fresh=true;
   }
-  S.base=portfolioValue();
   buildNav();buildHome();buildSwap();buildExplore();buildActivity();
   renderSwapChips();homeTick();stampR();
   if(fresh)showLock('new');
+  if(gap>=1)await catchUp(gap);
+  S.base=portfolioValue();homeTick();
+  try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(_){}
   last=Date.now();
   setInterval(loop,200);
-  document.addEventListener('visibilitychange',()=>{if(document.hidden)save()});
-  window.addEventListener('pagehide',save);
+  document.addEventListener('visibilitychange',()=>{if(document.hidden)save();else loop()});
+  window.addEventListener('pagehide',()=>save());
   save();
 }
 boot();
